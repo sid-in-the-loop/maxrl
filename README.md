@@ -90,7 +90,7 @@ python examples/maxrl_data_preprocess/gsm8k.py --local_dir /path/to/gsm8k
 
 ### 17x17 Maze
 
-1. Prepare data
+**Prepare data**
 
 Download preprocessed training data from huggingface:
 
@@ -104,7 +104,7 @@ or if you would like to manually generate a maze dataset:
 python maze/generate_maze.py
 ```
 
-2. SFT
+**SFT**
 
 We ran SFT for 1500 steps before reinforcement learning.
 
@@ -116,13 +116,13 @@ python maze/sft.py \
   --batch_size 32 \
   --learning_rate 5e-4 \
   --max_length 512 \
-  --save_steps 100 \
-  --eval_steps 100
+  --save_steps 500 \
+  --eval_steps 500
 ```
 
 or you can skip the SFT stage and use `maze/ckpt-1500`, which is a checkpoint after SFT.
 
-3. RL
+**RL**
 
 Setup path configurations in `maze/maze_17.sh`, then `bash maze/maze_17.sh`. Make sure to set `actor_rollout_ref.rollout.name=hf`, which significantly accelerates generation for very small models during RL training.
 
