@@ -90,15 +90,41 @@ python examples/maxrl_data_preprocess/gsm8k.py --local_dir /path/to/gsm8k
 
 ### 17x17 Maze
 
-1. Download preprocessed data
+1. Prepare data
+
+Download preprocessed training data from huggingface:
 
 ```
 huggingface-cli download guanning-ai/maze_17x17_1m --repo-type dataset --local-dir ./maze/data/
 ```
 
-2. Setup path configurations in `maze/maze_17.sh`
+or if you would like to manually generate a maze dataset:
 
-3. `bash maze/maze_17.sh`
+```
+python maze/generate_maze.py
+```
+
+2. SFT
+
+We ran SFT for 1500 steps before reinforcement learning.
+
+```
+python maze/sft.py \
+  --train_data ./maze/data/train.json \
+  --val_data ./maze/data/test.json \
+  --output_dir ./maze/checkpoints \
+  --batch_size 32 \
+  --learning_rate 5e-4 \
+  --max_length 512 \
+  --save_steps 100 \
+  --eval_steps 100
+```
+
+or you can skip the SFT stage and use `maze/ckpt-1500`, which is a checkpoint after SFT.
+
+3. RL
+
+Setup path configurations in `maze/maze_17.sh`, then `bash maze/maze_17.sh`. Make sure to set `actor_rollout_ref.rollout.name=hf`, which significantly accelerates generation for very small models during RL training.
 
 ### ImageNet experiments
 

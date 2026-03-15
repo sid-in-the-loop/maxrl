@@ -11,7 +11,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
-from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen2Config, get_cosine_schedule_with_warmup
+from tokenizers import Tokenizer, models as tok_models, pre_tokenizers, AddedToken
 from tqdm import tqdm
 import pandas as pd
 import numpy as np
@@ -293,6 +294,68 @@ class MazeValidator:
         return None
 
 
+MAZE_VOCAB = {
+    "<pad>": 0, "<bos>": 1, "<eos>": 2, "<unk>": 3,
+    "GRID_START": 4, "GRID_END": 5, "PATH_START": 6, "DONE": 7,
+    "PATH": 8, "WALL": 9, "GOAL": 10, "START": 11, "NEWLINE": 12,
+    "UP": 13, "DOWN": 14, "LEFT": 15, "RIGHT": 16, "\n": 17,
+}
+
+
+def create_model_from_scratch(args):
+    num_reserved = 14
+    vocab_size = len(MAZE_VOCAB) + num_reserved
+
+    config = Qwen2Config(
+        vocab_size=vocab_size,
+        hidden_size=args.hidden_size,
+        num_hidden_layers=args.num_hidden_layers,
+        num_attention_heads=args.num_attention_heads,
+        num_key_value_heads=args.num_key_value_heads,
+        intermediate_size=args.intermediate_size,
+        max_position_embeddings=args.max_position_embeddings,
+        hidden_act="silu",
+        rms_norm_eps=1e-6,
+        rope_theta=1000000.0,
+        tie_word_embeddings=True,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+        dtype="bfloat16",
+        use_cache=True,
+    )
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+
+    reserved = {f"RESERVED_{i}": len(MAZE_VOCAB) + i for i in range(num_reserved)}
+    full_vocab = {**MAZE_VOCAB, **reserved}
+    tok = Tokenizer(tok_models.WordLevel(vocab=full_vocab, unk_token="<unk>"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    for t in ["<pad>", "<bos>", "<eos>", "<unk>"]:
+        tok.add_special_tokens([AddedToken(t, special=True)])
+
+    save_dir = os.path.join(args.output_dir, "init_model")
+    os.makedirs(save_dir, exist_ok=True)
+    model.save_pretrained(save_dir)
+    tok.save(os.path.join(save_dir, "tokenizer.json"))
+    for fname, data in [
+        ("tokenizer_config.json", {
+            "bos_token": "<bos>", "eos_token": "<eos>", "unk_token": "<unk>",
+            "pad_token": "<pad>", "tokenizer_class": "PreTrainedTokenizerFast",
+            "model_max_length": args.max_position_embeddings,
+        }),
+        ("special_tokens_map.json", {
+            "bos_token": "<bos>", "eos_token": "<eos>",
+            "unk_token": "<unk>", "pad_token": "<pad>",
+        }),
+    ]:
+        with open(os.path.join(save_dir, fname), "w") as f:
+            json.dump(data, f, indent=2)
+
+    num_params = sum(p.numel() for p in model.parameters())
+    logger.info(f"Model initialized from scratch: {num_params:,} params, vocab_size={vocab_size}, saved to {save_dir}")
+    return save_dir
+
+
 class MazeSFTTrainer:
     """Maze SFT Trainer with Generative Evaluation"""
     
@@ -300,11 +363,15 @@ class MazeSFTTrainer:
         self.args = args
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # 加载模型和tokenizer
-        logger.info(f"Loading model from {args.model_path}")
-        self.tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
+        model_path = args.model_path
+        if model_path is None:
+            logger.info("No model_path provided, creating model from scratch...")
+            model_path = create_model_from_scratch(args)
+
+        logger.info(f"Loading model from {model_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
-            args.model_path,
+            model_path,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
         ).to(self.device)
@@ -695,11 +762,17 @@ class MazeSFTTrainer:
 def main():
     parser = argparse.ArgumentParser(description="Maze SFT Trainer")
     
-    # 数据参数
-    parser.add_argument("--model_path", type=str, required=True, help="Path to pretrained model")
+    parser.add_argument("--model_path", type=str, default=None, help="Path to pretrained model (if omitted, trains from scratch)")
     parser.add_argument("--train_data", type=str, required=True, help="Path to training data")
     parser.add_argument("--val_data", type=str, required=True, help="Path to validation data")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory")
+
+    parser.add_argument("--hidden_size", type=int, default=256)
+    parser.add_argument("--num_hidden_layers", type=int, default=4)
+    parser.add_argument("--num_attention_heads", type=int, default=4)
+    parser.add_argument("--num_key_value_heads", type=int, default=2)
+    parser.add_argument("--intermediate_size", type=int, default=1024)
+    parser.add_argument("--max_position_embeddings", type=int, default=512)
     
     # 训练参数
     parser.add_argument("--learning_rate", type=float, default=5e-4, help="Learning rate")
