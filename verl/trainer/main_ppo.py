@@ -184,7 +184,7 @@ class TaskRunner:
 
         # Create training and validation datasets.
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor) if config.data.val_files else None
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.

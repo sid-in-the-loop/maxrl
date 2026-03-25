@@ -15,9 +15,13 @@
 import logging
 import os
 
-import pkg_resources
+try:
+    import pkg_resources
+    from pkg_resources import DistributionNotFound
+except ImportError:
+    pkg_resources = None
+    DistributionNotFound = Exception
 from packaging.version import parse as parse_version
-from pkg_resources import DistributionNotFound
 
 from .protocol import DataProto
 from .utils.device import is_npu_available

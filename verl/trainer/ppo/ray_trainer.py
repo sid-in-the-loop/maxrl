@@ -594,7 +594,7 @@ class RayPPOTrainer:
 
         if train_dataset is None:
             train_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
-        if val_dataset is None:
+        if val_dataset is None and self.config.data.val_files:
             val_dataset = create_rl_dataset(self.config.data.val_files, self.config.data, self.tokenizer, self.processor)
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
 
@@ -614,23 +614,26 @@ class RayPPOTrainer:
             sampler=train_sampler,
         )
 
-        val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
-        if val_batch_size is None:
-            val_batch_size = len(self.val_dataset)
+        if self.val_dataset is not None:
+            val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
+            if val_batch_size is None:
+                val_batch_size = len(self.val_dataset)
 
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            batch_size=val_batch_size,
-            num_workers=self.config.data.get("dataloader_num_workers", 8),
-            shuffle=self.config.data.get("validation_shuffle", True),
-            drop_last=False,
-            collate_fn=collate_fn,
-        )
+            self.val_dataloader = StatefulDataLoader(
+                dataset=self.val_dataset,
+                batch_size=val_batch_size,
+                num_workers=self.config.data.get("dataloader_num_workers", 8),
+                shuffle=self.config.data.get("validation_shuffle", True),
+                drop_last=False,
+                collate_fn=collate_fn,
+            )
+        else:
+            self.val_dataloader = None
 
         assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
-        assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
 
-        print(f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: {len(self.val_dataloader)}")
+        val_dl_len = len(self.val_dataloader) if self.val_dataloader is not None else 0
+        print(f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: {val_dl_len}")
 
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
 
@@ -700,6 +703,8 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
+        if self.val_dataloader is None:
+            return {}
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -1787,6 +1792,36 @@ class RayPPOTrainer:
                             )
 
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+
+                        # ── Per-step console summary (first prompt's rollouts) ──
+                        try:
+                            scores_all = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                            n_rollouts = self.config.actor_rollout_ref.rollout.n
+                            first_scores = scores_all[:n_rollouts]
+                            n_correct = sum(1 for s in first_scores if s == 1.0)
+                            n_idk = sum(1 for s in first_scores if s == 0.5)
+                            n_wrong = sum(1 for s in first_scores if s == 0.0)
+                            # batch-wide stats
+                            total = len(scores_all)
+                            batch_correct = sum(1 for s in scores_all if s == 1.0)
+                            batch_idk = sum(1 for s in scores_all if s == 0.5)
+                            batch_wrong = sum(1 for s in scores_all if s == 0.0)
+                            batch_mean = sum(scores_all) / max(total, 1)
+                            print(
+                                f"\n{'='*60}\n"
+                                f"  Step {self.global_steps} Reward Summary\n"
+                                f"  Prompt #0 ({n_rollouts} rollouts): "
+                                f"correct={n_correct} idk={n_idk} wrong={n_wrong} "
+                                f"scores={[round(s,1) for s in first_scores]}\n"
+                                f"  Batch ({total} rollouts): "
+                                f"mean={batch_mean:.3f} correct={batch_correct}/{total} "
+                                f"idk={batch_idk}/{total} ({batch_idk/max(total,1):.1%}) "
+                                f"wrong={batch_wrong}/{total}\n"
+                                f"{'='*60}",
+                                flush=True,
+                            )
+                        except Exception:
+                            pass
 
                         # Log training data accuracy bins if available
                         train_data_accuracy_bins = {}

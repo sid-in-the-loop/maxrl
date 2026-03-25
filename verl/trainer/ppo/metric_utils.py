@@ -137,7 +137,29 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         return_diff_var = torch.var(valid_returns - valid_values)
         return_var = torch.var(valid_returns)
 
+    # Compute per-prompt group signal metrics (how many prompts have non-uniform rewards)
+    group_signal_metrics = {}
+    if "uid" in batch.non_tensor_batch:
+        uid = batch.non_tensor_batch["uid"]
+        scores_np = sequence_score.detach().cpu().numpy()
+        uid2scores = defaultdict(list)
+        for i, u in enumerate(uid):
+            uid2scores[u].append(scores_np[i])
+        n_prompts = len(uid2scores)
+        # A prompt has gradient signal if not all rollout scores are identical
+        n_with_signal = sum(1 for scores_list in uid2scores.values() if max(scores_list) != min(scores_list))
+        n_all_correct = sum(1 for scores_list in uid2scores.values() if min(scores_list) == 1.0)
+        n_all_wrong = sum(1 for scores_list in uid2scores.values() if max(scores_list) == 0.0)
+        group_signal_metrics = {
+            "group/n_prompts": n_prompts,
+            "group/n_with_gradient_signal": n_with_signal,
+            "group/frac_with_gradient_signal": n_with_signal / max(n_prompts, 1),
+            "group/n_all_correct": n_all_correct,
+            "group/n_all_wrong": n_all_wrong,
+        }
+
     metrics = {
+        **group_signal_metrics,
         # score
         "critic/score/mean": torch.mean(sequence_score).detach().item(),
         "critic/score/max": torch.max(sequence_score).detach().item(),
@@ -177,6 +199,19 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = True) -> Dict[str,
         "prompt_length/min": torch.min(prompt_length).detach().item(),
         "prompt_length/clip_ratio": torch.mean(torch.eq(prompt_length, max_prompt_length).float()).detach().item(),
     }
+
+    # Log any extra reward info stored in non_tensor_batch (e.g. is_idk, is_correct from custom reward fn)
+    _skip_keys = {"uid", "data_source", "extracted_answer", "prompt_key", "extra_info"}
+    for key, vals in batch.non_tensor_batch.items():
+        if key in _skip_keys:
+            continue
+        try:
+            import numpy as np
+            arr = np.array(vals, dtype=float)
+            metrics[f"reward_extra/{key}/mean"] = float(np.mean(arr))
+        except (ValueError, TypeError):
+            pass
+
     return metrics
 
 
